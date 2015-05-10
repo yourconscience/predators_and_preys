@@ -1,7 +1,11 @@
 import random
 import sys
+import os
+import time
 import argparse
 import ConfigParser
+
+DISCRETE_TIME = False
 
 class Cell(object):
     def __init__(self, x, y):
@@ -25,7 +29,11 @@ class Creature(EmptyCell):
     def __init__(self, x, y, reproduceCycle):
         super(Creature, self).__init__(x, y)
         self.reproduceCycle = reproduceCycle
-        self.timeToReproduce = reproduceCycle
+        if DISCRETE_TIME:
+            self.timeToReproduce = reproduceCycle
+        else:
+            self.timeToReproduce = random.randrange(reproduceCycle) + 1
+
 
     def ChooseNeighbor(self, neighbors, neighborType=EmptyCell):
         selectedNeighbors = filter(lambda x: type(x) == neighborType, neighbors)
@@ -111,7 +119,7 @@ class Ocean(object):
 
     def __init__(self, config):
         self.images = {'Empty' : ' ', 'Obstacle' : '*', 'Prey' : 'O', 'Predator' : 'X'}
-        self.GetData(config)
+        self.ParseData(config)
 
     def ParseInitialState(self, field):
         field = field[1:].split('\n')
@@ -124,10 +132,24 @@ class Ocean(object):
                 if self.images['Obstacle'] == image:
                     self.data[y][x] = Obstacle(x, y)
                 if self.images['Prey'] == image:
-                    self.data[y][x] = Prey(x, y, self.PreyReproduceCycle)
+                    self.data[y][x] = Prey(x, y, self.preyReproduceCycle)
                 if self.images['Predator'] == image:
-                    self.data[y][x] = Predator(x, y, self.PredatorReproduceCycle,
-                                               self.PredatorStarveCycle)
+                    self.data[y][x] = Predator(x, y, self.predatorReproduceCycle,
+                                               self.predatorStarveCycle)
+
+    def GenerateRandomState(self, obstacleProb, preyProb, predatorProb):
+        for y in range(self.height):
+            for x in range(self.width):
+                choice = random.uniform(0, 1)
+                if choice < obstacleProb:
+                    self.data[y][x] = Obstacle(x, y)
+                elif choice - obstacleProb < preyProb:
+                    self.data[y][x] = Prey(x, y, self.preyReproduceCycle)
+                elif choice - obstacleProb - preyProb < predatorProb:
+                    self.data[y][x] = Predator(x, y, self.predatorReproduceCycle,
+                                               self.predatorStarveCycle)
+                else:
+                    self.data[y][x] = EmptyCell(x, y)
 
     def GetNeighbors(self, x, y):
         neighbors = []
@@ -136,22 +158,34 @@ class Ocean(object):
                 neighbors.append(self.data[j][i])
         return neighbors
 
-    def GetData(self, config):
+    def NumOfPreys(self):
+        return sum(sum(1 for cell in line if type(cell) == Prey) for line in self.data)
+
+    def NumOfPredators(self):
+        return sum(sum(1 for cell in line if type(cell) == Predator) for line in self.data)
+
+    def ParseData(self, config):
         parser = ConfigParser.SafeConfigParser()
         parser.read(config)
         self.width = parser.getint('ocean_state', 'width')
         self.height = parser.getint('ocean_state', 'height')
-        self.PreyReproduceCycle = parser.getint('prey_params', 'reproduceCycle')
-        self.PredatorReproduceCycle = parser.getint('predator_params', 'reproduceCycle')
-        self.PredatorStarveCycle = parser.getint('predator_params', 'starveCycle')
+        self.preyReproduceCycle = parser.getint('prey_params', 'reproduceCycle')
+        self.predatorReproduceCycle = parser.getint('predator_params', 'reproduceCycle')
+        self.predatorStarveCycle = parser.getint('predator_params', 'starveCycle')
         self.data = [['@' for _ in range(self.width)] for _ in range(self.height)]
         if parser.get('ocean_state', 'mode') == 'preset':
             self.ParseInitialState(parser.get('ocean_state', 'field'))
+        elif parser.get('ocean_state', 'mode') == 'random':
+            self.GenerateRandomState(parser.getfloat('ocean_state', 'obstacleProbability'),
+                                     parser.getfloat('ocean_state', 'preyProbability'),
+                                     parser.getfloat('ocean_state', 'predatorProbability'))
+        else:
+            assert ValueError('Incorrect ocean state mode')
 
     def Act(self):
         self.processed = [[False for _ in range(self.width)] for _ in range(self.height)]
-        for y, line in enumerate(self.data):
-            for x, image in enumerate(line):
+        for y in range(self.height):
+            for x in range(self.width):
                 if not(self.processed[y][x]):
                     self.processed[y][x] = True
                     self.data[y][x].Act(self)
@@ -165,17 +199,48 @@ class Ocean(object):
             field.append(''.join(images))
         return '\n'.join(field) + '\n'
 
-if __name__ == '__main__':
+
+def parseArgs():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c','--config', default='config.ini',
-                        help='Path to configuration file (default: config.ini)')
-    parser.add_argument('-o','--output', default=sys.stdout, type=argparse.FileType('w'),
-                        help='Path to output file (default: sys.stdout')
     parser.add_argument('iterations', type=int,
-                        help='Number of iterations for process modeling')
+                        help='Number of iterations for process modeling.')
+    parser.add_argument('-c','--config', default='config.ini',
+                        help='Path to configuration file (default: config.ini).')
+    parser.add_argument('-d', '--discrete', action='store_true', default=False,
+                        help='Time of reproduce and starve are dicrete.')
+    parser.add_argument('-r', '--randomSeed', type=int, default=None,
+                        help='Used for fields generated randomly.')
+    parser.add_argument('-s', '--stats', action='store_true', default=False,
+                        help='Calculate stats and make plots of population, if on.')
     args = parser.parse_args()
+    return args
+
+def simulate(args):
     ocean = Ocean(args.config)
-    args.output.write(str(ocean))
+    sys.stdout.write(str(ocean))
+    for turn in range(args.iterations):
+        ocean.Act()
+        os.system('clear')
+        sys.stdout.write('Turn {}. Preys: {}, predators: {}\n'.format(turn,
+                                                                      ocean.NumOfPreys(),
+                                                                      ocean.NumOfPredators()))
+        sys.stdout.write(str(ocean))
+        time.sleep(0.00001)
+
+def makeReport(args):
+    ocean = Ocean(args.config)
+    preys, predators = [], []
     for i in range(args.iterations):
         ocean.Act()
-        args.output.write(str(ocean))
+        preys.append(ocean.NumOfPreys())
+        predators.append(ocean.NumOfPredators())
+
+
+if __name__ == '__main__':
+    args = parseArgs()
+    DISCRETE_TIME = args.discrete
+    random.seed(args.randomSeed)
+    if args.stats:
+        makeReport(args)
+    else:
+        simulate(args)
